@@ -13,6 +13,8 @@ import logging
 import api
 import datetime
 
+import db
+
 load_dotenv()
 
 TOKEN = os.getenv("TOKEN")
@@ -60,6 +62,7 @@ dp.include_router(router)
 def get_main_menu_text_and_markup():
     builder = InlineKeyboardBuilder()
     builder.button(text=f"Расписание", callback_data="races")
+    builder.button(text="Напоминания о гонках", callback_data="notifications", style=ButtonStyle.PRIMARY)
     builder.button(text="Помощь", callback_data="help")
     builder.adjust(1)
     return "Привет!", builder.as_markup()
@@ -90,6 +93,13 @@ class QualiResultsCallback(CallbackData, prefix="quali_res"):
 
 @router.message(CommandStart())
 async def cmd_start(message: types.Message):
+    user = message.from_user
+    if user:
+        exists = await db.check_user(user.username)
+        if not exists:
+            created = await db.create_user(user.username, user.first_name, user.last_name,user.id)
+            print(f"Зареган ли юзер: {created}")
+
     text, markup = get_main_menu_text_and_markup()
     await message.answer(text, reply_markup=markup)
 
@@ -192,6 +202,7 @@ async def get_race_results_handler(callback: types.CallbackQuery, callback_data:
         time_info = result.get("Time", {}).get("time") or result.get("status", "")
         text += f"<b>{position}. {driver_name}</b> ({constructor}) — {time_info}\n"
 
+
     builder = InlineKeyboardBuilder()
     builder.button(text="Назад", callback_data=RaceCallback(round=round_number))
     builder.adjust(1)
@@ -241,10 +252,67 @@ async def help(callback: types.CallbackQuery):
     await callback.answer("")
     await callback.message.answer("бог поможет")
 
+@router.callback_query(F.data == "notifications")
+async def user_notifications(callback: types.CallbackQuery):
+    user = callback.from_user
+    print(user.id)
+    user_data = await db.get_user(user.id)
+    builder = InlineKeyboardBuilder()
+    text = ""
+    if user_data["is_subscribed"]:
+        text += "Вы <b> подписаны </b> на уведомления"
+        builder.button(text="Отписаться", style=ButtonStyle.DANGER, callback_data="unsubscribe")
+    else:
+        text += "Вы <b>не подписаны</b> на уведомления"
+        builder.button(text="Подписаться", style=ButtonStyle.SUCCESS, callback_data="subscribe")
+    builder.button(text="В меню", callback_data="to_menu")
+    builder.adjust(1)
+    await callback.answer("")
+    if callback.message:
+        await callback.message.edit_text(text=text, reply_markup=builder.as_markup(), parse_mode=ParseMode.HTML)
+
+async def render_subscription_menu(callback: types.CallbackQuery, subscribe: bool):
+    user = callback.from_user
+    user_data = await db.get_user(user.id)
+    is_subscribed = user_data["is_subscribed"]
+
+    builder = InlineKeyboardBuilder()
+
+    if is_subscribed == subscribe:
+        text = "Вы уже подписаны" if is_subscribed else "Вы уже отписаны"
+    else:
+        await db.switch_subscription(user.id)
+        is_subscribed = subscribe
+        text = "Вы подписались на уведомления" if is_subscribed else "Вы отписались от уведомлений"
+
+    if is_subscribed:
+        builder.button(text="Отписаться", callback_data="unsubscribe", style=ButtonStyle.DANGER)
+    else:
+        builder.button(text="Подписаться", callback_data="subscribe", style=ButtonStyle.SUCCESS)
+    builder.button(text="В меню", callback_data="to_menu")
+    builder.adjust(1)
+    if callback.message:
+        await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode=ParseMode.HTML)
+
+
+@router.callback_query(F.data == "subscribe")
+async def subscribe(callback: types.CallbackQuery):
+    await render_subscription_menu(callback, subscribe=True)
+
+
+@router.callback_query(F.data == "unsubscribe")
+async def unsubscribe(callback: types.CallbackQuery):
+    await render_subscription_menu(callback, subscribe=False)
 
 async def main():
-  logging.basicConfig(level=logging.INFO)
-  await dp.start_polling(bot)
+    await db.init_pool()
+
+    logging.basicConfig(level=logging.INFO)
+    try:
+        await dp.start_polling(bot)
+        await db.init_pool()
+    finally:
+        await bot.session.close()
 
 if __name__ == "__main__":
     asyncio.run(main())
