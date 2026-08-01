@@ -10,10 +10,10 @@ from aiogram.enums import ParseMode, ButtonStyle
 from aiogram.client.default import DefaultBotProperties
 from aiogram.filters.callback_data import CallbackData
 import logging
-import api
 import datetime
 
 import db
+import scheduler
 
 load_dotenv()
 
@@ -68,8 +68,12 @@ def get_main_menu_text_and_markup():
     return "Привет!", builder.as_markup()
 
 def check_race_status(date, time):
-    dt_str = f"{date}T{time.replace('Z', '+00:00')}"
-    event_dt = datetime.datetime.fromisoformat(dt_str)
+    if time:
+        dt_str = f"{date}T{time.replace('Z', '+00:00')}"
+        event_dt = datetime.datetime.fromisoformat(dt_str)
+    else:
+        # только дата — считаем полночь UTC
+        event_dt = datetime.datetime.fromisoformat(date).replace(tzinfo=datetime.timezone.utc)
     delta = datetime.datetime.now(datetime.timezone.utc) - event_dt
 
     if delta.total_seconds() < 0:
@@ -95,7 +99,7 @@ class QualiResultsCallback(CallbackData, prefix="quali_res"):
 async def cmd_start(message: types.Message):
     user = message.from_user
     if user:
-        exists = await db.check_user(user.username)
+        exists = await db.check_user(user.id)
         if not exists:
             created = await db.create_user(user.username, user.first_name, user.last_name,user.id)
             print(f"Зареган ли юзер: {created}")
@@ -106,18 +110,22 @@ async def cmd_start(message: types.Message):
 
 @router.callback_query(F.data == "races")
 async def get_races(callback: types.CallbackQuery):
-    data = api.get_races_data(datetime.date.today().year)
+    data = await db.get_races_data(datetime.date.today().year)
+    if data is None:
+        await callback.answer("Ошибка при загрузке данных, попробуйте позже", show_alert=True)
+        return
     races = data["MRData"]["RaceTable"]["Races"]
     print(races)
     builder = InlineKeyboardBuilder()
     for race in races:
-        if check_race_status(race["date"], race["time"]) == "🏁":
+        status = check_race_status(race["date"], race.get("time"))
+        if status == "🏁":
             style = ButtonStyle.DANGER
-        if check_race_status(race["date"], race["time"]) == "🟢":
+        if status == "🟢":
             style = ButtonStyle.SUCCESS
-        if check_race_status(race["date"], race["time"]) == "":
+        if status == "":
             style=None
-        builder.button(text=f" {check_race_status(race["date"], race["time"])} {COUNTRY_FLAGS.get(race["Circuit"]["Location"]["country"])} {race["Circuit"]["Location"]["locality"]} ",
+        builder.button(text=f" {status} {COUNTRY_FLAGS.get(race["Circuit"]["Location"]["country"])} {race["Circuit"]["Location"]["locality"]} ",
                        callback_data=RaceCallback(round=int(race["round"])),
                        style=style
                        )
@@ -133,8 +141,10 @@ async def get_races(callback: types.CallbackQuery):
 @router.callback_query(RaceCallback.filter())
 async def get_race_details(callback: types.CallbackQuery, callback_data: RaceCallback):
     round_number = int(callback.data.split(":")[1])
-    data = api.get_race_data(datetime.date.today().year, round_number)
-    print(data)
+    data = await db.get_race_data(datetime.date.today().year, round_number)
+    if data is None:
+        await callback.answer("Ошибка при загрузке данных, попробуйте позже", show_alert=True)
+        return
     races = data["MRData"]["RaceTable"]["Races"]
 
     if not races:
@@ -170,7 +180,7 @@ async def get_race_details(callback: types.CallbackQuery, callback_data: RaceCal
         text += "\n" + "\n".join(session_lines)
 
     builder = InlineKeyboardBuilder()
-    if check_race_status(race["date"], race["time"]) == "🏁" :
+    if check_race_status(race["date"], race.get("time")) == "🏁" :
         builder.button(text="Результаты гонки", callback_data=RaceResultsCallback(round=round_number), style=ButtonStyle.SUCCESS)
         builder.button(text="Результаты квалификации", callback_data=QualiResultsCallback(round=round_number),style=ButtonStyle.PRIMARY)
     builder.button(text="Назад", callback_data="races")
@@ -183,7 +193,10 @@ async def get_race_details(callback: types.CallbackQuery, callback_data: RaceCal
 @router.callback_query(RaceResultsCallback.filter())
 async def get_race_results_handler(callback: types.CallbackQuery, callback_data: RaceResultsCallback):
     round_number = callback_data.round
-    data = api.get_race_results(datetime.date.today().year, round_number)
+    data = await db.get_race_results(datetime.date.today().year, round_number)
+    if data is None:
+        await callback.answer("Ошибка при загрузке данных, попробуйте позже", show_alert=True)
+        return
     races = data["MRData"]["RaceTable"]["Races"]
 
     if not races or not races[0].get("Results"):
@@ -214,12 +227,23 @@ async def get_race_results_handler(callback: types.CallbackQuery, callback_data:
 @router.callback_query(QualiResultsCallback.filter())
 async def get_qualifying_results_handler(callback: types.CallbackQuery, callback_data: QualiResultsCallback):
     round_number = callback_data.round
-    data = api.get_qualifying_results(datetime.date.today().year, round_number)
+    data = await db.get_qualifying_results(datetime.date.today().year, round_number)
+    if data is None:
+        await callback.answer("Ошибка при загрузке данных, попробуйте позже", show_alert=True)
+        return
     races = data["MRData"]["RaceTable"]["Races"]
 
     if not races or not races[0].get("QualifyingResults"):
         await callback.answer("Результаты квалификации ещё не доступны", show_alert=True)
         return
+
+    race = races[0]
+    results = race["QualifyingResults"]
+
+    text = f"⏱ Квалификация: {race['raceName']}\n\n"
+    for result in results:
+        position = result["position"]
+        driver = result["Driver"]
 
     race = races[0]
     results = race["QualifyingResults"]
@@ -252,66 +276,128 @@ async def help(callback: types.CallbackQuery):
     await callback.answer("")
     await callback.message.answer("бог поможет")
 
+TIMING_LABELS = {
+    "1h": "За 1 час",
+    "15m": "За 15 минут",
+    "both": "За 1 час и за 15 минут",
+}
+
+SESSIONS_LABELS = {
+    "main": "Только квалификации, спринты и гонки",
+    "all": "Все сессии (включая практики)",
+}
+
+
+async def get_notifications_text_and_markup(tg_id: int):
+    user_data = await db.get_user(tg_id)
+    if not user_data:
+        builder = InlineKeyboardBuilder()
+        builder.button(text="В меню", callback_data="to_menu")
+        return "Пользователь не найден. Нажмите /start", builder.as_markup()
+
+    is_subscribed = user_data.get("is_subscribed", False)
+    notify_timing = user_data.get("notify_timing", "1h")
+    notify_sessions = user_data.get("notify_sessions", "main")
+
+    status_str = "<b>Подписаны</b> 🔔" if is_subscribed else "<b>Не подписаны</b> 🔕"
+    timing_str = TIMING_LABELS.get(notify_timing, notify_timing)
+    sessions_str = SESSIONS_LABELS.get(notify_sessions, notify_sessions)
+
+    text = (
+        f"⚙️ <b>Настройки уведомлений</b>\n\n"
+        f"Статус: {status_str}\n"
+        f"⏱ Время: <b>{timing_str}</b>\n"
+        f"🏎 Сессии: <b>{sessions_str}</b>\n\n"
+        f"<i>Нажмите кнопки ниже для изменения настроек:</i>"
+    )
+
+    builder = InlineKeyboardBuilder()
+
+    if is_subscribed:
+        builder.button(text="🔴 Отписаться от уведомлений", callback_data="unsubscribe", style=ButtonStyle.DANGER)
+    else:
+        builder.button(text="🟢 Подписаться на уведомления", callback_data="subscribe", style=ButtonStyle.SUCCESS)
+
+    timing_1h_mark = "✅ " if notify_timing == "1h" else ""
+    timing_15m_mark = "✅ " if notify_timing == "15m" else ""
+    timing_both_mark = "✅ " if notify_timing == "both" else ""
+
+    builder.button(text=f"{timing_1h_mark}⏱ 1 час", callback_data="set_timing:1h")
+    builder.button(text=f"{timing_15m_mark}⏱ 15 мин", callback_data="set_timing:15m")
+    builder.button(text=f"{timing_both_mark}⏱ 1ч + 15мин", callback_data="set_timing:both")
+
+    sess_main_mark = "✅ " if notify_sessions == "main" else ""
+    sess_all_mark = "✅ " if notify_sessions == "all" else ""
+
+    builder.button(text=f"{sess_main_mark}🏎 Важные", callback_data="set_sessions:main")
+    builder.button(text=f"{sess_all_mark}🏁 Все сессии", callback_data="set_sessions:all")
+
+    builder.button(text="🔙 В меню", callback_data="to_menu")
+
+    builder.adjust(1, 3, 2, 1)
+    return text, builder.as_markup()
+
+
 @router.callback_query(F.data == "notifications")
 async def user_notifications(callback: types.CallbackQuery):
     user = callback.from_user
-    print(user.id)
-    user_data = await db.get_user(user.id)
-    builder = InlineKeyboardBuilder()
-    text = ""
-    if user_data["is_subscribed"]:
-        text += "Вы <b> подписаны </b> на уведомления"
-        builder.button(text="Отписаться", style=ButtonStyle.DANGER, callback_data="unsubscribe")
-    else:
-        text += "Вы <b>не подписаны</b> на уведомления"
-        builder.button(text="Подписаться", style=ButtonStyle.SUCCESS, callback_data="subscribe")
-    builder.button(text="В меню", callback_data="to_menu")
-    builder.adjust(1)
+    text, markup = await get_notifications_text_and_markup(user.id)
     await callback.answer("")
     if callback.message:
-        await callback.message.edit_text(text=text, reply_markup=builder.as_markup(), parse_mode=ParseMode.HTML)
-
-async def render_subscription_menu(callback: types.CallbackQuery, subscribe: bool):
-    user = callback.from_user
-    user_data = await db.get_user(user.id)
-    is_subscribed = user_data["is_subscribed"]
-
-    builder = InlineKeyboardBuilder()
-
-    if is_subscribed == subscribe:
-        text = "Вы уже подписаны" if is_subscribed else "Вы уже отписаны"
-    else:
-        await db.switch_subscription(user.id)
-        is_subscribed = subscribe
-        text = "Вы подписались на уведомления" if is_subscribed else "Вы отписались от уведомлений"
-
-    if is_subscribed:
-        builder.button(text="Отписаться", callback_data="unsubscribe", style=ButtonStyle.DANGER)
-    else:
-        builder.button(text="Подписаться", callback_data="subscribe", style=ButtonStyle.SUCCESS)
-    builder.button(text="В меню", callback_data="to_menu")
-    builder.adjust(1)
-    if callback.message:
-        await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode=ParseMode.HTML)
+        await callback.message.edit_text(text=text, reply_markup=markup, parse_mode=ParseMode.HTML)
 
 
 @router.callback_query(F.data == "subscribe")
 async def subscribe(callback: types.CallbackQuery):
-    await render_subscription_menu(callback, subscribe=True)
+    user = callback.from_user
+    await db.set_subscription(user.id, True)
+    text, markup = await get_notifications_text_and_markup(user.id)
+    await callback.answer("Вы подписались на уведомления")
+    if callback.message:
+        await callback.message.edit_text(text=text, reply_markup=markup, parse_mode=ParseMode.HTML)
 
 
 @router.callback_query(F.data == "unsubscribe")
 async def unsubscribe(callback: types.CallbackQuery):
-    await render_subscription_menu(callback, subscribe=False)
+    user = callback.from_user
+    await db.set_subscription(user.id, False)
+    text, markup = await get_notifications_text_and_markup(user.id)
+    await callback.answer("Вы отписались от уведомлений")
+    if callback.message:
+        await callback.message.edit_text(text=text, reply_markup=markup, parse_mode=ParseMode.HTML)
+
+
+@router.callback_query(F.data.startswith("set_timing:"))
+async def set_timing(callback: types.CallbackQuery):
+    user = callback.from_user
+    timing = callback.data.split(":")[1]
+    await db.update_user_settings(user.id, notify_timing=timing)
+    text, markup = await get_notifications_text_and_markup(user.id)
+    await callback.answer(f"Время: {TIMING_LABELS.get(timing)}")
+    if callback.message:
+        await callback.message.edit_text(text=text, reply_markup=markup, parse_mode=ParseMode.HTML)
+
+
+@router.callback_query(F.data.startswith("set_sessions:"))
+async def set_sessions(callback: types.CallbackQuery):
+    user = callback.from_user
+    sessions = callback.data.split(":")[1]
+    await db.update_user_settings(user.id, notify_sessions=sessions)
+    text, markup = await get_notifications_text_and_markup(user.id)
+    await callback.answer("Виды сессий обновлены")
+    if callback.message:
+        await callback.message.edit_text(text=text, reply_markup=markup, parse_mode=ParseMode.HTML)
 
 async def main():
     await db.init_pool()
 
     logging.basicConfig(level=logging.INFO)
+    scheduler_task = asyncio.create_task(scheduler.start_reminder_scheduler(bot))
     try:
         await dp.start_polling(bot)
-        await db.init_pool()
     finally:
+        scheduler_task.cancel()
+        await db.close_pool()
         await bot.session.close()
 
 if __name__ == "__main__":
