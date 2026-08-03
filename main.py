@@ -234,7 +234,17 @@ async def to_menu(callback: types.CallbackQuery):
 async def help_handler(callback: types.CallbackQuery):
     await callback.answer("")
     if callback.message:
-        await callback.message.answer("бог поможет")
+        text = (
+            "ℹ️ <b>О боте</b>\n\n"
+            "Этот бот присылает уведомления о сессиях Формулы 1: "
+            "практики, квалификации и гонки.\n\n"
+            "👨‍💻 <b>Разработчики:</b>\n"
+            '• Ilimated — <a href="https://github.com/il1mated">GitHub</a>\n'
+            '• krunpy — <a href="https://github.com/krunpy0">GitHub</a>\n'
+        )
+        builder = InlineKeyboardBuilder()
+        builder.button(text="⬅️ В меню", callback_data="to_menu")
+        await callback.message.edit_text(text, reply_markup=builder.as_markup())
 
 
 async def get_notifications_text_and_markup(tg_id: int):
@@ -344,15 +354,67 @@ async def set_sessions(callback: types.CallbackQuery):
         await callback.message.edit_text(text=text, reply_markup=markup, parse_mode=ParseMode.HTML)
 
 
+# ---------------------------------------------------------------------------
+# Polling-health tracking
+# ---------------------------------------------------------------------------
+# An asyncio.Event that is *set* when polling works normally.
+# Cleared when the bot is stuck in a TelegramConflictError retry loop.
+polling_healthy: asyncio.Event | None = None
+
+
+class _ConflictDetector(logging.Handler):
+    """Watch ``aiogram.dispatcher`` logs for consecutive ConflictError lines.
+
+    When *threshold* consecutive "Failed to fetch updates" errors appear,
+    the polling_healthy event is cleared so that the scheduler can pause.
+    Any "Connection established" or successful update resets the counter.
+    """
+
+    def __init__(self, event: asyncio.Event, threshold: int = 3):
+        super().__init__(level=logging.ERROR)
+        self._event = event
+        self._threshold = threshold
+        self._consecutive_failures = 0
+
+    def emit(self, record: logging.LogRecord) -> None:
+        msg = record.getMessage()
+        if "Failed to fetch updates" in msg and "ConflictError" in msg:
+            self._consecutive_failures += 1
+            if self._consecutive_failures >= self._threshold:
+                self._event.clear()
+        elif "Connection established" in msg or record.levelno <= logging.INFO:
+            self.reset()
+
+    def reset(self) -> None:
+        self._consecutive_failures = 0
+        self._event.set()
+
+
 async def health_handler(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok"})
 
 
 async def main():
+    global polling_healthy
+
     await db.init_pool()
     await api_client.init_session()
 
     logging.basicConfig(level=logging.INFO)
+
+    # Polling-health event — set = healthy, clear = unhealthy
+    polling_healthy = asyncio.Event()
+    polling_healthy.set()  # assume healthy at startup
+
+    # Install conflict detector on aiogram's dispatcher logger
+    conflict_handler = _ConflictDetector(polling_healthy, threshold=3)
+    logging.getLogger("aiogram.dispatcher").addHandler(conflict_handler)
+
+    # Mark polling as healthy whenever an update is successfully received
+    @dp.update.outer_middleware()
+    async def _mark_polling_healthy(handler, event, data):
+        conflict_handler.reset()  # also resets consecutive failure counter
+        return await handler(event, data)
 
     # Start health-check HTTP server
     health_app = web.AppRunner(web.Application())
@@ -362,7 +424,9 @@ async def main():
     await site.start()
     logging.info("Health endpoint listening on port %s", os.getenv("PORT", "8080"))
 
-    scheduler_task = asyncio.create_task(scheduler.start_reminder_scheduler(bot))
+    scheduler_task = asyncio.create_task(
+        scheduler.start_reminder_scheduler(bot, polling_healthy=polling_healthy)
+    )
     try:
         await dp.start_polling(bot)
     finally:

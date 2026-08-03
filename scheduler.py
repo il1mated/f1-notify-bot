@@ -1,4 +1,5 @@
 import asyncio
+from asyncio import Event
 import datetime
 import logging
 from aiogram import Bot
@@ -89,11 +90,22 @@ async def check_and_send_reminders(bot: Bot):
                     await db.mark_reminder_sent(season, round_num, session_key, reminder_type)
 
 
-async def start_reminder_scheduler(bot: Bot, check_interval: int = 60):
+async def start_reminder_scheduler(
+    bot: Bot,
+    check_interval: int = 60,
+    polling_healthy: Event | None = None,
+):
     logger.info("F1 Reminder Scheduler started.")
     while True:
         try:
-            await check_and_send_reminders(bot)
+            # If polling health tracking is enabled, skip work while polling is unhealthy
+            # (e.g. stuck in TelegramConflictError retry loop)
+            if polling_healthy is not None and not polling_healthy.is_set():
+                logger.warning(
+                    "Polling is unhealthy — scheduler skipping this cycle."
+                )
+            else:
+                await check_and_send_reminders(bot)
         except asyncio.CancelledError:
             logger.info("F1 Reminder Scheduler cancelled.")
             break

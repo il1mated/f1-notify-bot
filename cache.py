@@ -1,4 +1,4 @@
-import asyncio
+
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -55,7 +55,7 @@ class JolpicaCache:
         ttl_hours: float = 6,
     ):
         try:
-            cached = await asyncio.wait_for(self.get(cache_key), timeout=2)
+            cached = await self.get(cache_key)
         except Exception:
             logger.exception("Cache read failed for %s", cache_key)
             return await fetch_fn()
@@ -68,10 +68,7 @@ class JolpicaCache:
             return None
 
         try:
-            await asyncio.wait_for(
-                self.set(cache_key, fresh_data, ttl_hours),
-                timeout=2,
-            )
+            await self.set(cache_key, fresh_data, ttl_hours)
         except Exception:
             logger.exception("Cache write failed for %s", cache_key)
 
