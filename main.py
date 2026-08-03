@@ -3,6 +3,7 @@ import os
 import logging
 import datetime
 from dotenv import load_dotenv
+from aiohttp import web
 
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram import F, Router, Bot, Dispatcher, types
@@ -343,16 +344,30 @@ async def set_sessions(callback: types.CallbackQuery):
         await callback.message.edit_text(text=text, reply_markup=markup, parse_mode=ParseMode.HTML)
 
 
+async def health_handler(request: web.Request) -> web.Response:
+    return web.json_response({"status": "ok"})
+
+
 async def main():
     await db.init_pool()
     await api_client.init_session()
 
     logging.basicConfig(level=logging.INFO)
+
+    # Start health-check HTTP server
+    health_app = web.AppRunner(web.Application())
+    health_app.app.router.add_get("/health", health_handler)
+    await health_app.setup()
+    site = web.TCPSite(health_app, "0.0.0.0", int(os.getenv("PORT", "8080")))
+    await site.start()
+    logging.info("Health endpoint listening on port %s", os.getenv("PORT", "8080"))
+
     scheduler_task = asyncio.create_task(scheduler.start_reminder_scheduler(bot))
     try:
         await dp.start_polling(bot)
     finally:
         scheduler_task.cancel()
+        await health_app.cleanup()
         await api_client.close_session()
         await db.close_pool()
         await bot.session.close()
