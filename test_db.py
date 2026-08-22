@@ -60,6 +60,47 @@ class SubscriptionTest(unittest.IsolatedAsyncioTestCase):
         subscribers = await db.get_matching_subscribers("Race", "1d")
         self.assertEqual(subscribers, [100, 200])
 
+    async def test_create_reminder_campaign(self):
+        db.pool = AsyncMock()
+        db.pool.fetchrow.return_value = {"id": 10}
+        campaign_id = await db.create_reminder_campaign(2026, 1, "Race", "1h")
+        self.assertEqual(campaign_id, 10)
+
+        db.pool.fetchrow.return_value = None
+        campaign_id_conflict = await db.create_reminder_campaign(2026, 1, "Race", "1h")
+        self.assertIsNone(campaign_id_conflict)
+
+    async def test_populate_campaign_deliveries(self):
+        db.pool = AsyncMock()
+        db.pool.execute.return_value = "INSERT 0 42"
+        count = await db.populate_campaign_deliveries(10, "1h", "Race")
+        self.assertEqual(count, 42)
+
+    async def test_get_pending_deliveries(self):
+        db.pool = AsyncMock()
+        db.pool.fetch.return_value = [{"id": 1, "tg_id": 111}, {"id": 2, "tg_id": 222}]
+        pending = await db.get_pending_deliveries(10, limit=500)
+        self.assertEqual(len(pending), 2)
+        self.assertEqual(pending[0], {"id": 1, "tg_id": 111})
+
+    async def test_update_delivery_status(self):
+        db.pool = AsyncMock()
+        await db.update_delivery_status(1, "sent")
+        db.pool.execute.assert_awaited_once()
+
+    async def test_mark_campaign_completed(self):
+        db.pool = AsyncMock()
+        await db.mark_campaign_completed(10)
+        db.pool.execute.assert_awaited_once()
+
+    async def test_get_in_progress_campaigns(self):
+        db.pool = AsyncMock()
+        db.pool.fetch.return_value = [
+            {"id": 1, "season": 2026, "round": 1, "session_key": "Race", "reminder_type": "1h"}
+        ]
+        in_progress = await db.get_in_progress_campaigns()
+        self.assertEqual(len(in_progress), 1)
+        self.assertEqual(in_progress[0]["id"], 1)
 
 
 if __name__ == "__main__":

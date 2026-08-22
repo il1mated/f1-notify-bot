@@ -53,15 +53,45 @@ async def init_db():
     )
     """)
     await pool.execute("""
-    CREATE TABLE IF NOT EXISTS sent_reminders (
+    CREATE TABLE IF NOT EXISTS reminder_campaigns (
         id BIGSERIAL PRIMARY KEY,
         season INT NOT NULL,
         round INT NOT NULL,
         session_key TEXT NOT NULL,
         reminder_type TEXT NOT NULL,
-        sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        status TEXT NOT NULL DEFAULT 'in_progress',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        completed_at TIMESTAMPTZ,
         UNIQUE (season, round, session_key, reminder_type)
     )
+    """)
+    await pool.execute("""
+    CREATE TABLE IF NOT EXISTS reminder_deliveries (
+        id BIGSERIAL PRIMARY KEY,
+        campaign_id BIGINT NOT NULL REFERENCES reminder_campaigns(id) ON DELETE CASCADE,
+        tg_id BIGINT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        error_message TEXT,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (campaign_id, tg_id)
+    )
+    """)
+    await pool.execute("""
+    CREATE INDEX IF NOT EXISTS idx_reminder_deliveries_pending 
+    ON reminder_deliveries (campaign_id, status) 
+    WHERE status = 'pending'
+    """)
+    # Migration: copy old sent_reminders to reminder_campaigns if table exists
+    await pool.execute("""
+    DO $$
+    BEGIN
+        IF EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'sent_reminders') THEN
+            INSERT INTO reminder_campaigns (season, round, session_key, reminder_type, status, created_at, completed_at)
+            SELECT season, round, session_key, reminder_type, 'completed', sent_at, sent_at
+            FROM sent_reminders
+            ON CONFLICT (season, round, session_key, reminder_type) DO NOTHING;
+        END IF;
+    END $$;
     """)
     await pool.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS notify_timing TEXT NOT NULL DEFAULT '1h'")
     await pool.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS notify_sessions TEXT NOT NULL DEFAULT 'main'")
@@ -122,11 +152,118 @@ async def get_subscribed_user_ids():
         raise
 
 
+async def create_reminder_campaign(season: int, round_num: int, session_key: str, reminder_type: str) -> int | None:
+    try:
+        row = await pool.fetchrow(
+            """
+            INSERT INTO reminder_campaigns (season, round, session_key, reminder_type, status)
+            VALUES ($1, $2, $3, $4, 'in_progress')
+            ON CONFLICT (season, round, session_key, reminder_type) DO NOTHING
+            RETURNING id
+            """,
+            season, round_num, session_key, reminder_type
+        )
+        return row["id"] if row else None
+    except asyncpg.PostgresError as e:
+        print(f"DB error while creating reminder campaign: {e}")
+        return None
+
+
+async def populate_campaign_deliveries(campaign_id: int, reminder_type: str, session_key: str) -> int:
+    try:
+        result = await pool.execute(
+            """
+            INSERT INTO reminder_deliveries (campaign_id, tg_id, status)
+            SELECT $1, tg_id, 'pending'
+            FROM users
+            WHERE is_subscribed = TRUE
+              AND (
+                $2 = ANY(string_to_array(notify_timing, ','))
+                OR (notify_timing = 'both' AND $2 = ANY(ARRAY['1h', '15m']))
+              )
+              AND (
+                notify_sessions = 'all'
+                OR (notify_sessions = 'main' AND $3 = ANY(ARRAY['Qualifying', 'SprintQualifying', 'Sprint', 'Race']))
+              )
+            ON CONFLICT (campaign_id, tg_id) DO NOTHING
+            """,
+            campaign_id, reminder_type, session_key
+        )
+        try:
+            return int(result.split()[-1])
+        except Exception:
+            return 0
+    except asyncpg.PostgresError as e:
+        print(f"DB error while populating campaign deliveries: {e}")
+        return 0
+
+
+async def get_pending_deliveries(campaign_id: int, limit: int = 500) -> list[dict]:
+    try:
+        rows = await pool.fetch(
+            """
+            SELECT id, tg_id FROM reminder_deliveries
+            WHERE campaign_id = $1 AND status = 'pending'
+            ORDER BY id ASC
+            LIMIT $2
+            """,
+            campaign_id, limit
+        )
+        return [{"id": row["id"], "tg_id": row["tg_id"]} for row in rows]
+    except asyncpg.PostgresError as e:
+        print(f"DB error while getting pending deliveries for campaign {campaign_id}: {e}")
+        return []
+
+
+async def update_delivery_status(delivery_id: int, status: str, error_message: str | None = None):
+    try:
+        await pool.execute(
+            """
+            UPDATE reminder_deliveries
+            SET status = $2, error_message = $3, updated_at = NOW()
+            WHERE id = $1
+            """,
+            delivery_id, status, error_message
+        )
+    except asyncpg.PostgresError as e:
+        print(f"DB error while updating delivery status {delivery_id}: {e}")
+
+
+async def mark_campaign_completed(campaign_id: int):
+    try:
+        await pool.execute(
+            """
+            UPDATE reminder_campaigns
+            SET status = 'completed', completed_at = NOW()
+            WHERE id = $1
+            """,
+            campaign_id
+        )
+    except asyncpg.PostgresError as e:
+        print(f"DB error while marking campaign {campaign_id} completed: {e}")
+
+
+async def get_in_progress_campaigns() -> list[dict]:
+    try:
+        rows = await pool.fetch(
+            """
+            SELECT id, season, round, session_key, reminder_type
+            FROM reminder_campaigns
+            WHERE status = 'in_progress'
+            ORDER BY id ASC
+            """
+        )
+        return [dict(row) for row in rows]
+    except asyncpg.PostgresError as e:
+        print(f"DB error while getting in_progress campaigns: {e}")
+        return []
+
+
 async def is_reminder_sent(season: int, round_num: int, session_key: str, reminder_type: str) -> bool:
     try:
         row = await pool.fetchrow(
             """
-            SELECT 1 FROM sent_reminders
+            SELECT 1 FROM reminder_campaigns
             WHERE season = $1 AND round = $2 AND session_key = $3 AND reminder_type = $4
             """,
             season, round_num, session_key, reminder_type
@@ -141,9 +278,10 @@ async def mark_reminder_sent(season: int, round_num: int, session_key: str, remi
     try:
         await pool.execute(
             """
-            INSERT INTO sent_reminders (season, round, session_key, reminder_type)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (season, round, session_key, reminder_type) DO NOTHING
+            INSERT INTO reminder_campaigns (season, round, session_key, reminder_type, status, completed_at)
+            VALUES ($1, $2, $3, $4, 'completed', NOW())
+            ON CONFLICT (season, round, session_key, reminder_type)
+            DO UPDATE SET status = 'completed', completed_at = NOW()
             """,
             season, round_num, session_key, reminder_type
         )
