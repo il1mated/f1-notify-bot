@@ -177,7 +177,10 @@ async def get_matching_subscribers(session_key: str, reminder_type: str) -> list
             """
             SELECT tg_id FROM users
             WHERE is_subscribed = TRUE
-              AND (notify_timing = 'both' OR notify_timing = $1)
+              AND (
+                $1 = ANY(string_to_array(notify_timing, ','))
+                OR (notify_timing = 'both' AND $1 = ANY(ARRAY['1h', '15m']))
+              )
               AND (
                 notify_sessions = 'all'
                 OR (notify_sessions = 'main' AND $2 = ANY(ARRAY['Qualifying', 'SprintQualifying', 'Sprint', 'Race']))

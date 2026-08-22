@@ -65,6 +65,8 @@ async def check_and_send_reminders(bot: Bot):
 
             # Windows to evaluate
             windows = []
+            if 0 <= time_until_session <= 86400:
+                windows.append(("1d", "через 1 день"))
             if 0 <= time_until_session <= 3600:
                 windows.append(("1h", "через 1 час"))
             if 0 <= time_until_session <= 900:

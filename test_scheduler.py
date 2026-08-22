@@ -77,9 +77,43 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
         bot = AsyncMock()
         await scheduler.check_and_send_reminders(bot)
 
-        # Should send 2 messages: 1h window and 15m window
-        self.assertEqual(bot.send_message.await_count, 2)
-        self.assertEqual(mock_db.mark_reminder_sent.await_count, 2)
+        # Should evaluate 3 windows: 1d, 1h, and 15m
+        self.assertEqual(bot.send_message.await_count, 3)
+        self.assertEqual(mock_db.mark_reminder_sent.await_count, 3)
+
+    @patch("scheduler.api_client")
+    @patch("scheduler.db")
+    async def test_check_and_send_reminders_1d_only(self, mock_db, mock_api_client):
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        session_start = now_utc + datetime.timedelta(hours=12)
+        date_str = session_start.strftime("%Y-%m-%d")
+        time_str = session_start.strftime("%H:%M:%SZ")
+
+        mock_api_client.get_races_data = AsyncMock(return_value={
+            "MRData": {
+                "RaceTable": {
+                    "Races": [{
+                        "season": "2026",
+                        "round": "1",
+                        "raceName": "Australian Grand Prix",
+                        "Circuit": {"Location": {"country": "Australia", "locality": "Melbourne"}},
+                        "date": date_str,
+                        "time": time_str
+                    }]
+                }
+            }
+        })
+        mock_db.is_reminder_sent = AsyncMock(return_value=False)
+        mock_db.get_matching_subscribers = AsyncMock(return_value=[999])
+        mock_db.mark_reminder_sent = AsyncMock()
+
+        bot = AsyncMock()
+        await scheduler.check_and_send_reminders(bot)
+
+        # Only 1d window should trigger (12h is > 1h and <= 24h)
+        self.assertEqual(bot.send_message.await_count, 1)
+        self.assertEqual(mock_db.mark_reminder_sent.await_count, 1)
+        mock_db.mark_reminder_sent.assert_awaited_once_with(2026, 1, "Race", "1d")
 
 
 if __name__ == "__main__":

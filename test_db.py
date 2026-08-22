@@ -54,6 +54,13 @@ class SubscriptionTest(unittest.IsolatedAsyncioTestCase):
         subscribers = await db.get_matching_subscribers("Race", "1h")
         self.assertEqual(subscribers, [100])
 
+    async def test_get_matching_subscribers_1d(self):
+        db.pool = AsyncMock()
+        db.pool.fetch.return_value = [{"tg_id": 100}, {"tg_id": 200}]
+        subscribers = await db.get_matching_subscribers("Race", "1d")
+        self.assertEqual(subscribers, [100, 200])
+
+
 
 if __name__ == "__main__":
     unittest.main()

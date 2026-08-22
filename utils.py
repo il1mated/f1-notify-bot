@@ -1,5 +1,30 @@
 import datetime
-from constants import MSK
+from constants import MSK, ALL_TIMINGS, TIMING_LABELS
+
+
+
+def parse_notify_timings(raw: str | None) -> list[str]:
+    if not raw:
+        return ["1h"]
+    if raw == "both":
+        return ["1h", "15m"]
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    valid = [t for t in ALL_TIMINGS if t in parts]
+    return valid if valid else ["1h"]
+
+
+def serialize_notify_timings(timings: list[str] | set[str]) -> str:
+    ordered = [t for t in ALL_TIMINGS if t in timings]
+    return ",".join(ordered) if ordered else "1h"
+
+
+def format_timings_display(timings: list[str] | set[str] | str) -> str:
+    if isinstance(timings, str):
+        timings = parse_notify_timings(timings)
+    ordered = [t for t in ALL_TIMINGS if t in timings]
+    if not ordered:
+        return "Не выбрано"
+    return ", ".join(TIMING_LABELS.get(t, t) for t in ordered)
 
 
 def parse_session_datetime(date_str: str, time_str: str | None) -> datetime.datetime | None:

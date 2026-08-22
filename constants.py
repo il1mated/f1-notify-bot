@@ -37,9 +37,9 @@ SESSION_TITLES = {
 }
 
 TIMING_LABELS = {
+    "1d": "За 1 день",
     "1h": "За 1 час",
     "15m": "За 15 минут",
-    "both": "За 1 час и за 15 минут",
 }
 
 SESSIONS_LABELS = {
@@ -47,5 +47,7 @@ SESSIONS_LABELS = {
     "all": "Все сессии (включая практики)",
 }
 
-ALLOWED_TIMINGS = {"1h", "15m", "both"}
+ALL_TIMINGS = ["1d", "1h", "15m"]
+ALLOWED_TIMINGS = {"1d", "1h", "15m"}
 ALLOWED_SESSIONS = {"main", "all"}
+

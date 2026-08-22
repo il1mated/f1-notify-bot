@@ -22,7 +22,13 @@ from constants import (
     ALLOWED_TIMINGS,
     ALLOWED_SESSIONS,
 )
-from utils import format_session_datetime, check_race_status
+from utils import (
+    format_session_datetime,
+    check_race_status,
+    parse_notify_timings,
+    serialize_notify_timings,
+    format_timings_display,
+)
 
 load_dotenv()
 
@@ -258,8 +264,9 @@ async def get_notifications_text_and_markup(tg_id: int):
     notify_timing = user_data.get("notify_timing", "1h")
     notify_sessions = user_data.get("notify_sessions", "main")
 
+    timings = parse_notify_timings(notify_timing)
     status_str = "<b>Подписаны</b> 🔔" if is_subscribed else "<b>Не подписаны</b> 🔕"
-    timing_str = TIMING_LABELS.get(notify_timing, notify_timing)
+    timing_str = format_timings_display(timings)
     sessions_str = SESSIONS_LABELS.get(notify_sessions, notify_sessions)
 
     text = (
@@ -277,13 +284,13 @@ async def get_notifications_text_and_markup(tg_id: int):
     else:
         builder.button(text="🟢 Подписаться на уведомления", callback_data="subscribe", style=ButtonStyle.SUCCESS)
 
-    timing_1h_mark = "✅ " if notify_timing == "1h" else ""
-    timing_15m_mark = "✅ " if notify_timing == "15m" else ""
-    timing_both_mark = "✅ " if notify_timing == "both" else ""
+    timing_1d_mark = "✅ " if "1d" in timings else ""
+    timing_1h_mark = "✅ " if "1h" in timings else ""
+    timing_15m_mark = "✅ " if "15m" in timings else ""
 
+    builder.button(text=f"{timing_1d_mark}⏱ 1 день", callback_data="set_timing:1d")
     builder.button(text=f"{timing_1h_mark}⏱ 1 час", callback_data="set_timing:1h")
     builder.button(text=f"{timing_15m_mark}⏱ 15 мин", callback_data="set_timing:15m")
-    builder.button(text=f"{timing_both_mark}⏱ 1ч + 15мин", callback_data="set_timing:both")
 
     sess_main_mark = "✅ " if notify_sessions == "main" else ""
     sess_all_mark = "✅ " if notify_sessions == "all" else ""
@@ -333,9 +340,23 @@ async def set_timing(callback: types.CallbackQuery):
     if timing not in ALLOWED_TIMINGS:
         await callback.answer("Некорректное значение времени", show_alert=True)
         return
-    await db.update_user_settings(user.id, notify_timing=timing)
+
+    user_data = await db.get_user(user.id)
+    current_raw = user_data.get("notify_timing", "1h") if user_data else "1h"
+    current_timings = parse_notify_timings(current_raw)
+
+    if timing in current_timings:
+        if len(current_timings) == 1:
+            await callback.answer("Выберите хотя бы один вариант времени", show_alert=True)
+            return
+        current_timings.remove(timing)
+    else:
+        current_timings.append(timing)
+
+    new_timing_str = serialize_notify_timings(current_timings)
+    await db.update_user_settings(user.id, notify_timing=new_timing_str)
     text, markup = await get_notifications_text_and_markup(user.id)
-    await callback.answer(f"Время: {TIMING_LABELS.get(timing)}")
+    await callback.answer("Настройки времени обновлены")
     if callback.message:
         await callback.message.edit_text(text=text, reply_markup=markup, parse_mode=ParseMode.HTML)
 
