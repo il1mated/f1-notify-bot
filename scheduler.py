@@ -42,6 +42,7 @@ class AsyncRateLimiter:
 
 
 global_rate_limiter = AsyncRateLimiter(rate=25.0, burst=25.0)
+active_campaign_ids: set[int] = set()
 
 
 def build_reminder_text(
@@ -105,6 +106,7 @@ async def process_campaign_deliveries(
                 await db.update_delivery_status(delivery_id, "failed", error_message=str(e))
 
     try:
+        active_campaign_ids.add(campaign_id)
         while True:
             pending_batch = await db.get_pending_deliveries(campaign_id, limit=batch_size)
             if not pending_batch:
@@ -117,6 +119,8 @@ async def process_campaign_deliveries(
         logger.info("Campaign %d completed successfully.", campaign_id)
     except Exception as e:
         logger.error("Error processing deliveries for campaign %d: %s", campaign_id, e)
+    finally:
+        active_campaign_ids.discard(campaign_id)
 
 
 async def send_reminder_to_subscribers(bot: Bot, subscribers: list[int], text: str):
@@ -196,6 +200,7 @@ async def check_and_send_reminders(bot: Bot):
                     count = await db.populate_campaign_deliveries(campaign_id, reminder_type, session_key)
                     if count > 0:
                         text = build_reminder_text(race_name, country, locality, session_key, session_dt, time_label)
+                        active_campaign_ids.add(campaign_id)
                         asyncio.create_task(
                             process_campaign_deliveries(bot, campaign_id, text)
                         )
@@ -207,6 +212,8 @@ async def check_and_send_reminders(bot: Bot):
     if in_progress:
         for camp in in_progress:
             camp_id = camp["id"]
+            if camp_id in active_campaign_ids:
+                continue
             key = (camp["season"], camp["round"], camp["session_key"])
             info = sessions_map.get(key)
             if info:
@@ -222,6 +229,7 @@ async def check_and_send_reminders(bot: Bot):
                     info["race_name"], info["country"], info["locality"],
                     camp["session_key"], info["session_dt"], time_label
                 )
+                active_campaign_ids.add(camp_id)
                 asyncio.create_task(
                     process_campaign_deliveries(bot, camp_id, text)
                 )

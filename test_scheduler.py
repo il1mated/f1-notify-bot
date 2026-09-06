@@ -8,6 +8,9 @@ import scheduler
 
 
 class SchedulerTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        scheduler.active_campaign_ids.clear()
+
     def test_parse_session_datetime(self):
         dt = scheduler.parse_session_datetime("2026-03-15", "05:00:00Z")
         self.assertIsNotNone(dt)
@@ -220,6 +223,48 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(bot.send_message.await_count, 1)
         mock_db.mark_campaign_completed.assert_awaited_once_with(42)
+
+    @patch("scheduler.api_client")
+    @patch("scheduler.db")
+    async def test_check_and_send_reminders_no_duplicate_when_in_progress(self, mock_db, mock_api_client):
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        session_start = now_utc + datetime.timedelta(hours=12)
+        date_str = session_start.strftime("%Y-%m-%d")
+        time_str = session_start.strftime("%H:%M:%SZ")
+
+        mock_api_client.get_races_data = AsyncMock(return_value={
+            "MRData": {
+                "RaceTable": {
+                    "Races": [{
+                        "season": "2026",
+                        "round": "1",
+                        "raceName": "Australian Grand Prix",
+                        "Circuit": {"Location": {"country": "Australia", "locality": "Melbourne"}},
+                        "date": date_str,
+                        "time": time_str
+                    }]
+                }
+            }
+        })
+        # Simulate realistic DB behavior: newly created campaign 1 is in progress in DB
+        mock_db.create_reminder_campaign = AsyncMock(return_value=1)
+        mock_db.populate_campaign_deliveries = AsyncMock(return_value=1)
+        mock_db.get_in_progress_campaigns = AsyncMock(return_value=[
+            {"id": 1, "season": 2026, "round": 1, "session_key": "Race", "reminder_type": "1d"}
+        ])
+        mock_db.get_pending_deliveries = AsyncMock(side_effect=[
+            [{"id": 1, "tg_id": 999}], []
+        ])
+        mock_db.update_delivery_status = AsyncMock()
+        mock_db.mark_campaign_completed = AsyncMock()
+
+        bot = AsyncMock()
+        await scheduler.check_and_send_reminders(bot)
+        await asyncio.sleep(0.05)
+
+        # Message must be sent exactly once, not duplicated!
+        self.assertEqual(bot.send_message.await_count, 1)
+        self.assertEqual(mock_db.mark_campaign_completed.await_count, 1)
 
 
 if __name__ == "__main__":
