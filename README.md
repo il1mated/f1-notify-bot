@@ -10,7 +10,7 @@ The bot helps Formula 1 fans never miss a session (practice, qualification, or r
 
 # Bot in Telegram
 
-You can find the bot on Telegram: [@notifyf1_bot](https://t.me/@notifyf1_bot)
+You can find the bot on Telegram: [@notifyf1_bot](https://t.me/notifyf1_bot)
 
 # How to Run the Bot
 
