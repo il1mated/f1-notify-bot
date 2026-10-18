@@ -16,7 +16,7 @@ You can find the bot on Telegram: [@notifyf1_bot](https://t.me/notifyf1_bot)
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com
+   git clone https://github.com/il1mated/f1-notify-bot.git
    cd f1-notify-bot
    ```
 
